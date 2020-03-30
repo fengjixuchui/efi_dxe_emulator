@@ -187,6 +187,15 @@ hook_code(uc_engine *uc, uint64_t address, uint32_t size, void *user_data)
 {
 //    DEBUG_MSG("Hit code at 0x%llx", address);
     
+    if (g_break)
+    {
+        /* display current CPU context like gdbinit */
+        context_cmd(NULL, uc);
+        /* and let the user take control */
+        prompt_loop();
+        g_break = false;
+    }
+
     int type = 0;
     if (find_breakpoint(address, &type) == 0)
     {
@@ -240,26 +249,28 @@ hook_unmapped_mem(uc_engine *uc, uc_mem_type type, uint64_t address, int size, i
     uc_mem_read(uc, r_rsp, &backtrace, sizeof(backtrace));
     DEBUG_MSG("Backtrace 0x%llx", backtrace);
     switch(type) {
-        default:
-            ERROR_MSG("UC_HOOK_MEM_INVALID type: %d at 0x%llx", type, address);
-            return false;
         case UC_MEM_READ_UNMAPPED:
             ERROR_MSG("Read from invalid memory at 0x%llx, data size = %u", address, size);
-            return false;
+            break;
         case UC_MEM_WRITE_UNMAPPED:
             ERROR_MSG("Write to invalid memory at 0x%llx, data size = %u, data value = 0x%llx", address, size, value);
-            return false;
+            break;
         case UC_MEM_FETCH_PROT:
             ERROR_MSG("Fetch from non-executable memory at 0x%llx", address);
-            return false;
+            break;
         case UC_MEM_WRITE_PROT:
             ERROR_MSG("Write to non-writeable memory at 0x%llx, data size = %u, data value = 0x%llx", address, size, value);
-            return false;
+            break;
         case UC_MEM_READ_PROT:
             ERROR_MSG("Read from non-readable memory at 0x%llx, data size = %u", address, size);
-            return false;
+            break;
+        default:
+            ERROR_MSG("UC_HOOK_MEM_INVALID type: %d at 0x%llx", type, address);
+            break;
     }
     DEBUG_MSG("Unmapped mem hit 0x%llx", address);
+    /* and let the user take control */
+    prompt_loop();
     return 0;
 }
 
