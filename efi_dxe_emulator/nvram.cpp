@@ -84,6 +84,8 @@
 #include "cmds.h"
 #include "mem_utils.h"
 #include "guids.h"
+#include <iomanip>
+#include <sstream>
 
 uint8_t *g_nvram_buf;
 size_t g_nvram_buf_size;
@@ -91,7 +93,8 @@ size_t g_nvram_buf_size;
 struct nvram_vars_tailhead g_nvram_vars = TAILQ_HEAD_INITIALIZER(g_nvram_vars);
 
 static int dump_nvram_cmd(const char *exp, uc_engine *uc);
-static void dump_nvram_vars(void);
+static int edit_variable_cmd(const char* exp, uc_engine* uc);
+static void dump_nvram_vars(const std::string& var_name);
 static void retrieve_nvram_vars(void);
 static int parse_nvram(uint8_t *buf, size_t buf_size);
 
@@ -101,6 +104,7 @@ void
 register_nvram_cmds(uc_engine *uc)
 {
     add_user_cmd("nvram", NULL, dump_nvram_cmd, "Dump NVRAM contents.\n\nnvram", uc);
+    add_user_cmd("ev", NULL, edit_variable_cmd, "Edit NVRAM variable.\n\nnvram", uc);
 }
 
 #pragma endregion
@@ -110,7 +114,84 @@ register_nvram_cmds(uc_engine *uc)
 static int
 dump_nvram_cmd(const char *exp, uc_engine *uc)
 {
-    dump_nvram_vars();
+    auto cmd_tokens = tokenize(exp);
+    _ASSERT(cmd_tokens.at(0) == "nvram");
+
+    std::string var_name;
+    try
+    {
+        var_name = cmd_tokens.at(1);
+    }
+    catch (const std::out_of_range&)
+    {
+        ; // Nothing
+    }
+
+    dump_nvram_vars(var_name);
+    return 0;
+}
+
+static int
+edit_variable_cmd(const char* exp, uc_engine* uc)
+{
+    auto cmd_tokens = tokenize(exp);
+    _ASSERT(cmd_tokens.at(0) == "ev");
+    
+    std::wstring var_name;
+    try
+    {
+        var_name = to_wstring(cmd_tokens.at(1));
+    }
+    catch (const std::out_of_range&)
+    {
+        WARNING_MSG("No variable was specified");
+        return 0;
+    }
+
+    uint32_t var_size = 0;
+    unsigned char* var_data = nullptr;
+    auto var = lookup_nvram_var(var_name.c_str(), nullptr, &var_size, &var_data);
+    if (!var)
+    {
+        ERROR_MSG("Variable %S not found", var_name.c_str());
+        return 0;
+    }
+
+    auto tmpname = std::tmpnam(nullptr);
+    auto tmpfile = fopen(tmpname, "wb");
+    fwrite(var_data, 1, var_size, tmpfile);
+    fclose(tmpfile);
+
+    // Run hex editor
+    std::stringstream ss;
+    ss << std::quoted(g_config.hex_editor);
+    ss << " ";
+    ss << tmpname;
+
+    STARTUPINFO si{};
+    PROCESS_INFORMATION pi{};
+    BOOL rc = CreateProcessA(
+        nullptr,
+        ss.str().data(),
+        nullptr,
+        nullptr,
+        FALSE,
+        0,
+        nullptr,
+        nullptr,
+        &si,
+        &pi);
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+
+    // Re-load the variable.
+    tmpfile = fopen(tmpname, "rb");
+    fread(var_data, 1, var_size, tmpfile);
+    fclose(tmpfile);
+
+    var->data = var_data;
+
     return 0;
 }
 
@@ -270,72 +351,26 @@ find_vss_var(uint8_t *store_buf, uint32_t store_size, CHAR16 *var_name, EFI_GUID
     return 0;
 }
 
-int
-lookup_nvram_var(CHAR16 *var_name, EFI_GUID *guid, uint32_t *content_size, unsigned char **out_buf)
+struct nvram_variables *
+lookup_nvram_var(const CHAR16 *var_name, EFI_GUID *guid, uint32_t *content_size, unsigned char **out_buf)
 {
-    uint8_t *buf_ptr = g_nvram_buf;
-    size_t cur_pos = 0;
-    
-    while (cur_pos < g_nvram_buf_size)
+    struct nvram_variables* entry = NULL;
+    TAILQ_FOREACH(entry, &g_nvram_vars, entries)
     {
-        VSS_VARIABLE_STORE_HEADER *vss_header = (VSS_VARIABLE_STORE_HEADER*)buf_ptr;
-        switch (vss_header->Signature) {
-            case NVRAM_VSS_STORE_SIGNATURE:
-            {
-                find_vss_var(buf_ptr + sizeof(VSS_VARIABLE_STORE_HEADER), vss_header->Size - sizeof(VSS_VARIABLE_STORE_HEADER), var_name, guid, content_size, out_buf);
-                buf_ptr += vss_header->Size;
-                cur_pos += vss_header->Size;
-                break;
-            }
-            case NVRAM_APPLE_SVS_STORE_SIGNATURE:
-            {
-                find_vss_var(buf_ptr + sizeof(VSS_VARIABLE_STORE_HEADER), vss_header->Size - sizeof(VSS_VARIABLE_STORE_HEADER), var_name, guid, content_size, out_buf);
-                buf_ptr += vss_header->Size;
-                cur_pos += vss_header->Size;
-                break;
-            }
-            case NVRAM_NVAR_ENTRY_SIGNATURE:
-            {
-                auto nvar_header = (NVAR_ENTRY_HEADER*)buf_ptr;
-                // GUID can be stored with the variable or in a separate store, so there will only be an index of it
-                uint32_t name_offset = (nvar_header->Attributes & NVRAM_NVAR_ENTRY_GUID) ? sizeof(EFI_GUID) : sizeof(UINT8);
-                auto name_ptr = (CHAR8*)(nvar_header + 1) + name_offset;
-                if (nvar_header->Attributes & NVRAM_NVAR_ENTRY_ASCII_NAME) {
-                    // Name is stored as ASCII string of CHAR8s
-                    std::string text(name_ptr);
-                    uint32_t name_size = text.length() + 1;
-                    auto var_name_ascii = std::make_unique<CHAR8[]>(0x100);
-                    UnicodeStrToAsciiStr(var_name, var_name_ascii.get());
-                    if (text == var_name_ascii.get())
-                    {
-                        DEBUG_MSG("Found variable!");
-                        *content_size = nvar_header->Size - (name_offset + name_size + sizeof(NVAR_ENTRY_HEADER));
-                        *out_buf = static_cast<unsigned char*>(my_malloc(*content_size));
-                        memcpy(*out_buf, (unsigned char*)(name_ptr + name_size), *content_size);
-                    }
-                }
-                else {
-                    // Name is stored as UCS2 string of CHAR16s, not supported at the moment
-                    ;
-                }
-
-                buf_ptr += nvar_header->Size;
-                cur_pos += nvar_header->Size;
-                break;
-            }
-            default:
-            {
-                buf_ptr += 1;
-                cur_pos += 1;
-                break;
-            }
+        if (wcsncmp(entry->name, var_name, entry->name_size) == 0)
+        {
+            DEBUG_MSG("Found variable!");
+            *out_buf = static_cast<unsigned char*>(my_malloc(entry->data_size));
+            memcpy(*out_buf, entry->data, entry->data_size);
+            *content_size = entry->data_size;
+            break;
         }
     }
-    return 0;
+    return entry;
 }
 
 static void
-dump_nvram_vars(void)
+dump_nvram_vars(const std::string& var_name)
 {
     OUTPUT_MSG("\n-[ NVRAM variables dump ]---------------------");
     struct nvram_variables *entry = NULL;
@@ -344,13 +379,11 @@ dump_nvram_vars(void)
         uint32_t length = StrLen(entry->name);
         auto c_string = static_cast<char *>(my_malloc(length+2));
         UnicodeStrToAsciiStr(entry->name, c_string);
+        bool include = var_name.empty() || (var_name == c_string);
+        if (!include) goto next;
         OUTPUT_MSG("\n-[ Variable: %s ]-", c_string);
         EFI_GUID *guid = &entry->guid;
-        OUTPUT_MSG("-[ GUID: %08X-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X ]-",
-                   guid->Data1, guid->Data2, guid->Data3,
-                   guid->Data4[0], guid->Data4[1], guid->Data4[2], guid->Data4[3],
-                   guid->Data4[4], guid->Data4[5], guid->Data4[6], guid->Data4[7]);
-        free(c_string);
+        OUTPUT_MSG("-[ GUID: %s ]-", guid_to_string(guid));
         /* output data in hex and characters if possible */
         int i = 0;
         int x = 0;
@@ -380,8 +413,9 @@ dump_nvram_vars(void)
             }
             i += 16;
             fprintf(stdout, "|\n");
-
         }
+    next:
+        free(c_string);
     }
     OUTPUT_MSG("\n-[ End NVRAM variables dump ]---------------------");
     return;
@@ -451,6 +485,70 @@ retrieve_nvram_vars(void)
                 }
                 buf_ptr += vss_header->Size;
                 cur_pos += vss_header->Size;
+                break;
+            }
+            case NVRAM_NVAR_ENTRY_SIGNATURE:
+            {
+                auto nvar_header = (NVAR_ENTRY_HEADER*)buf_ptr;
+                // GUID can be stored with the variable or in a separate store, so there will only be an index of it
+                uint32_t name_offset = (nvar_header->Attributes & NVRAM_NVAR_ENTRY_GUID) ? sizeof(EFI_GUID) : sizeof(UINT8);
+                auto name_ptr = (CHAR8*)(nvar_header + 1) + name_offset;
+                std::wstring var_name;
+                uint32_t name_size = 0;
+                if (nvar_header->Attributes & NVRAM_NVAR_ENTRY_DATA_ONLY)
+                {
+                    DEBUG_MSG("Data only variables not supported at the moment");
+                    buf_ptr += nvar_header->Size;
+                    cur_pos += nvar_header->Size;
+                    break;
+                }
+                if (nvar_header->Attributes & NVRAM_NVAR_ENTRY_ASCII_NAME) {
+                    // Name is stored as ASCII string of CHAR8s
+                    var_name = to_wstring(name_ptr);
+                    name_size = var_name.length() + 1;
+                }
+                else
+                {
+                    // Name is stored as UCS2 string of CHAR16s
+                    var_name = reinterpret_cast<wchar_t*>(name_ptr);
+                    name_size = (var_name.length() + 1) * sizeof(wchar_t);
+                }
+
+                // Get entry GUID
+                EFI_GUID guid{};
+                if (nvar_header->Attributes & NVRAM_NVAR_ENTRY_GUID)
+                {
+                    // GUID is stored in the variable itself
+                    guid = *reinterpret_cast<EFI_GUID*>(nvar_header + 1);
+                }
+                else
+                {
+                    // GUID is stored in GUID list at the end of the store
+                    auto guidIndex = *(UINT8*)(nvar_header + 1);
+
+                    // The list begins at the end of the store and goes backwards
+                    auto guid_ptr = reinterpret_cast<EFI_GUID*>(g_nvram_buf + g_nvram_buf_size) - 1 - guidIndex;
+                    guid = *guid_ptr;
+                }
+
+                auto new_entry = static_cast<struct nvram_variables*>(my_malloc(sizeof(struct nvram_variables)));
+                memcpy(&new_entry->guid, &guid, sizeof(EFI_GUID));
+                if (var_name.length() <= sizeof(new_entry->name))
+                {
+                    memcpy(new_entry->name, var_name.c_str(), var_name.length() * 2 + sizeof(wchar_t));
+                }
+                else
+                {
+                    memcpy(new_entry->name, var_name.c_str(), sizeof(new_entry->name));
+                }
+                new_entry->name_size = name_size;
+                new_entry->data_size = nvar_header->Size - (name_offset + name_size + sizeof(NVAR_ENTRY_HEADER));
+                new_entry->data = static_cast<uint8_t*>(my_malloc(new_entry->data_size));
+                memcpy(new_entry->data, (unsigned char*)(name_ptr + name_size), new_entry->data_size);
+                TAILQ_INSERT_TAIL(&g_nvram_vars, new_entry, entries);
+
+                buf_ptr += nvar_header->Size;
+                cur_pos += nvar_header->Size;
                 break;
             }
             default:
