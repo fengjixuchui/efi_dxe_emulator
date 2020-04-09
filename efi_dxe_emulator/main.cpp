@@ -96,6 +96,7 @@
 #include "mem_utils.h"
 #include "guids.h"
 #include "sync.h"
+#include "events.h"
 
 extern struct bin_images_tailq g_images;
 struct configuration g_config;
@@ -233,16 +234,7 @@ main(int argc, const char * argv[])
     /* initialize the tailq that might hold protocols to load */
     TAILQ_INIT(&g_config.protos);
 
-    /* if there is no INI given try parameters */
-    if (ini_file == NULL)
-    {
-        /* set config values */
-        g_config.target_file = target_file;
-        g_config.nvram_file = nvram_file;
-        g_config.guids_file = guids_file;
-        g_config.hex_editor = hex_editor;
-    }
-    else
+    if (ini_file)
     {
         if (access(ini_file, R_OK) < 0)
         {
@@ -255,6 +247,12 @@ main(int argc, const char * argv[])
             return EXIT_FAILURE;
         }
     }
+
+    /* explicit parameters should override the INI file */
+    if (target_file) g_config.target_file = target_file;
+    if (nvram_file) g_config.nvram_file = nvram_file;
+    if (guids_file) g_config.guids_file = guids_file;
+    if (hex_editor) g_config.hex_editor = hex_editor;
 
     if (g_config.target_file == NULL)
     {
@@ -480,6 +478,10 @@ main(int argc, const char * argv[])
     OUTPUT_MSG("[+] Starting main image emulation...");
     err = uc_emu_start(uc, main_image->tramp_start, main_image->tramp_end, 0, 0);
     VERIFY_UC_OPERATION_RET(err, EXIT_FAILURE, "Failed to start Unicorn emulation");
+
+    OUTPUT_MSG("[+] Starting notification routines emulation...");
+    dispatch_event_notification_routines(uc);
+
     OUTPUT_MSG("[+] All done, main image emulation complete.");
     context_cmd("", uc);
     prompt_loop();

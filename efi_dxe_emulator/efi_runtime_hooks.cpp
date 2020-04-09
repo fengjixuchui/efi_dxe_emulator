@@ -98,14 +98,15 @@ static void hook_UpdateCapsule(uc_engine *uc, uint64_t address, uint32_t size, v
 static void hook_QueryCapsuleCapabilities(uc_engine *uc, uint64_t address, uint32_t size, void *user_data);
 static void hook_QueryVariableInfo(uc_engine *uc, uint64_t address, uint32_t size, void *user_data);
 
-struct runtime_hooks
+struct _runtime_hooks
 {
     char name[64];
     int offset;
     void *hook;
+    uint64_t addr;
 };
 
-struct runtime_hooks runtime_hooks[] = {
+struct _runtime_hooks runtime_hooks[] = {
     {
         .name = "GetTime",
         .offset = offsetof(EFI_RUNTIME_SERVICES, GetTime),
@@ -206,7 +207,8 @@ install_runtime_services(uc_engine *uc, uint64_t base_addr, size_t *out_count)
     /* add a Unicorn hook to each service - each hook corresponds to the emulated function */
     for (int i = 0; i < array_size; i++)
     {
-        add_unicorn_hook(uc, UC_HOOK_CODE, runtime_hooks[i].hook, hooks_addr + hook_size * i, hooks_addr + hook_size * i);
+        runtime_hooks[i].addr = hooks_addr + hook_size * i;
+        add_unicorn_hook(uc, UC_HOOK_CODE, runtime_hooks[i].hook, runtime_hooks[i].addr, runtime_hooks[i].addr);
     }
 
     err = uc_mem_write(uc, base_addr, (void*)&runtime_table, sizeof(EFI_RUNTIME_SERVICES));
@@ -232,6 +234,20 @@ lookup_runtime_services_table(int offset)
         }
     }
     return NULL;
+}
+
+uint64_t
+lookup_runtime_services_table(std::string_view name)
+{
+    size_t array_size = sizeof(runtime_hooks) / sizeof(*runtime_hooks);
+    for (int i = 0; i < array_size; i++)
+    {
+        if (name == runtime_hooks[i].name)
+        {
+            return runtime_hooks[i].addr;
+        }
+    }
+    return 0;
 }
 
 /*

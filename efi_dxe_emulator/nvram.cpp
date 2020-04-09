@@ -131,6 +131,37 @@ dump_nvram_cmd(const char *exp, uc_engine *uc)
     return 0;
 }
 
+static void
+hex_edit_file(const char *filename)
+{
+    /* Command line: <hex-editor> <filename> */
+    std::stringstream ss;
+    ss << std::quoted(g_config.hex_editor);
+    ss << " ";
+    ss << filename;
+
+#ifdef _WIN32
+    STARTUPINFO si{};
+    PROCESS_INFORMATION pi{};
+    BOOL rc = CreateProcessA(
+        nullptr,
+        ss.str().data(),
+        nullptr,
+        nullptr,
+        FALSE,
+        0,
+        nullptr,
+        nullptr,
+        &si,
+        &pi);
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+#else
+    system(ss.str().c_str());
+#endif // _WIN32
+}
+
 static int
 edit_variable_cmd(const char* exp, uc_engine* uc)
 {
@@ -153,8 +184,11 @@ edit_variable_cmd(const char* exp, uc_engine* uc)
     auto var = lookup_nvram_var(var_name.c_str(), nullptr, &var_size, &var_data);
     if (!var)
     {
-        ERROR_MSG("Variable %S not found", var_name.c_str());
-        return 0;
+        WARNING_MSG("Variable %S not found", var_name.c_str());
+        var = static_cast<struct nvram_variables*>(my_calloc(sizeof(struct nvram_variables), 1));
+        wcscpy(var->name, var_name.c_str());
+        var->name_size = var_name.length() * 2 + 2;
+        TAILQ_INSERT_TAIL(&g_nvram_vars, var, entries);
     }
 
     auto tmpname = std::tmpnam(nullptr);
@@ -162,34 +196,22 @@ edit_variable_cmd(const char* exp, uc_engine* uc)
     fwrite(var_data, 1, var_size, tmpfile);
     fclose(tmpfile);
 
-    // Run hex editor
-    std::stringstream ss;
-    ss << std::quoted(g_config.hex_editor);
-    ss << " ";
-    ss << tmpname;
-
-    STARTUPINFO si{};
-    PROCESS_INFORMATION pi{};
-    BOOL rc = CreateProcessA(
-        nullptr,
-        ss.str().data(),
-        nullptr,
-        nullptr,
-        FALSE,
-        0,
-        nullptr,
-        nullptr,
-        &si,
-        &pi);
-    WaitForSingleObject(pi.hProcess, INFINITE);
-    CloseHandle(pi.hProcess);
-    CloseHandle(pi.hThread);
+    hex_edit_file(tmpname);
 
     // Re-load the variable.
     tmpfile = fopen(tmpname, "rb");
+    fseek(tmpfile, 0, SEEK_END);
+    var_size = ftell(tmpfile);
+    fseek(tmpfile, 0, SEEK_SET);
+    var_data = static_cast<unsigned char *>(my_malloc(var_size));
     fread(var_data, 1, var_size, tmpfile);
     fclose(tmpfile);
-
+    
+    var->data_size = var_size;
+    if (var->data)
+    {
+        free(var->data);
+    }
     var->data = var_data;
 
     return 0;

@@ -72,6 +72,7 @@
 #include <sys/queue.h>
 #include <assert.h>
 #include <unicorn/unicorn.h>
+#include <stdexcept>
 
 #include "pe_definitions.h"
 #include "efi_definitions.h"
@@ -84,8 +85,12 @@
 #include "cmds.h"
 #include "loader.h"
 #include "string_ops.h"
+#include "protocols.h"
+#include "guids.h"
+#include "events.h"
 
 extern struct bin_images_tailq g_images;
+extern struct protocols_list_tailq g_installed_protocols;
 
 static int quit_cmd(const char *exp, uc_engine *uc);
 static int run_cmd(const char *exp, uc_engine *uc);
@@ -113,6 +118,9 @@ static int
 quit_cmd(const char *exp, uc_engine *uc)
 {
     uc_emu_stop(uc);
+    exit(0);
+
+    /* unreachable */
     return 1;
 }
 
@@ -141,33 +149,24 @@ info_cmd_help(void)
 static int
 info_cmd(const char *exp, uc_engine *uc)
 {
-    char *local_exp = NULL;
-    char *local_exp_ptr = NULL;
-    local_exp_ptr = local_exp = strdup(exp);
-    if (local_exp == NULL)
-    {
-        ERROR_MSG("strdup failed");
-        return 0;
-    }
+    auto tokens = tokenize(exp);
+    assert(tokens.at(0) == "info");
 
-    char *token = NULL;
-    /* get rid of info string */
-    strsep(&local_exp, " ");
-    /* extract subcommand */
-    token = strsep(&local_exp, " ");
-    free(local_exp_ptr);
-    
-    /* we need a target address */
-    if (token == NULL)
+    std::string token;
+    try
+    {
+        token = tokens.at(1);
+    }
+    catch (const std::out_of_range&)
     {
         info_cmd_help();
         return 0;
     }
-    
+
     struct bin_image *main_image = TAILQ_FIRST(&g_images);
     assert(main_image != NULL);
     
-    if (strncmp(token, "target", 7) == 0)
+    if (token == "target")
     {
         OUTPUT_MSG("EFI Executable:\n%s", main_image->file_path);
         OUTPUT_MSG("Base address: 0%llx", main_image->base_addr);
@@ -175,7 +174,7 @@ info_cmd(const char *exp, uc_engine *uc)
         OUTPUT_MSG("Image size: 0x%llx", main_image->buf_size);
         OUTPUT_MSG("Number of sections: %d", main_image->nr_sections);
     }
-    else if (strncmp(token, "all", 3) == 0)
+    else if (token == "all")
     {
         int count = 1;
         struct bin_image *tmp_image = NULL;
@@ -189,6 +188,28 @@ info_cmd(const char *exp, uc_engine *uc)
             OUTPUT_MSG("Entrypoint: 0x%llx (0x%llx)", tmp_image->base_addr + tmp_image->entrypoint, tmp_image->entrypoint);
             OUTPUT_MSG("Image size: 0x%llx", tmp_image->buf_size);
             OUTPUT_MSG("Number of sections: %d", tmp_image->nr_sections);
+        }
+    }
+    else if (token == "protocols")
+    {
+        int count = 1;
+        struct protocols_list *tmp_proto = NULL;
+        TAILQ_FOREACH(tmp_proto, &g_installed_protocols, entries)
+        {
+            OUTPUT_MSG("--- [Protocol #%02d ] ---", count++);
+            OUTPUT_MSG("GUID: %s", guid_to_string(&tmp_proto->guid));
+            OUTPUT_MSG("Friendly name: %s", get_guid_friendly_name(tmp_proto->guid));
+            OUTPUT_MSG("Interface: 0x%llx", tmp_proto->iface);
+        }
+    }
+    else if (token == "events")
+    {
+        for (const auto& ei : g_events)
+        {
+            OUTPUT_MSG("--- [EFI Event #%02p ] ---", ei.first);
+            OUTPUT_MSG("Notification routine: 0x%llx", ei.second.notify_routine);
+            OUTPUT_MSG("Notification context: 0x%llx", ei.second.notify_context);
+            OUTPUT_MSG("Signaled: %s", ei.second.signaled ? "TRUE" : "FALSE");
         }
     }
     /* everything else is invalid */

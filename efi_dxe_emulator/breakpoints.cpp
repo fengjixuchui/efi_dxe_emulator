@@ -86,6 +86,7 @@
 #include "capstone_utils.h"
 #include "mem_utils.h"
 #include "string_ops.h"
+#include <stdexcept>
 
 struct breakpoints_tailq g_breakpoints = TAILQ_HEAD_INITIALIZER(g_breakpoints);
 
@@ -143,6 +144,7 @@ add_breakpoint(uint64_t target_addr, uint64_t target_len, enum bp_type type)
 int
 del_breakpoint(uint64_t target_addr)
 {
+    int err = -1;
     struct breakpoint *cur_entry = NULL;
     struct breakpoint *tmp_entry = NULL;
     TAILQ_FOREACH_SAFE(cur_entry, &g_breakpoints, entries, tmp_entry)
@@ -155,10 +157,11 @@ del_breakpoint(uint64_t target_addr)
             //                ERROR_MSG("Failed to delete Unicorn breakpoint hook for 0x%llx.", target_addr);
             //            }
             free(cur_entry);
+            err = 0;
             break;
         }
     }
-    return 0;
+    return err;
 }
 
 int
@@ -185,67 +188,73 @@ find_breakpoint(uint64_t addr, int *type)
 static int
 add_bpt_cmd(const char *exp, uc_engine *uc)
 {
+    auto tokens = tokenize(exp);
+    _ASSERT(tokens.at(0) == "b");
+
     errno = 0;
     
-    char *token = NULL;
+    std::string token;
     uint64_t bpt_addr = 0;
     
-    char *local_exp = strdup(exp);
-    if (local_exp == NULL)
-    {
-        ERROR_MSG("strdup failed");
-        return 0;
-    }
-    char *local_exp_ptr = local_exp;
-    
-    strsep(&local_exp, " ");
-    token = strsep(&local_exp, " ");
-    
     /* we need a target address */
-    if (token == NULL)
+    try
+    {
+        token = tokens.at(1);
+    }
+    catch (const std::out_of_range&)
     {
         ERROR_MSG("Missing argument(s).");
-        free(local_exp_ptr);
         return 0;
     }
+
     /* must be in 0x format */
-    if (strncmp(token, "0x", 2) == 0)
+    if (token.starts_with("0x"))
     {
-        bpt_addr = strtoull(token, NULL, 16);
+        bpt_addr = strtoull(token.c_str(), NULL, 16);
         DEBUG_MSG("Breakpoint target address is 0x%llx", bpt_addr);
     }
-    /* everything else is invalid */
+    /* check if name of boot/runtime service */
     else
     {
-        ERROR_MSG("Invalid argument(s).");
-        free(local_exp_ptr);
-        return 0;
+        bpt_addr = lookup_runtime_services_table(token);
+        bpt_addr = bpt_addr ? bpt_addr : lookup_boot_services_table(token);
+        if (bpt_addr == 0)
+        {
+            ERROR_MSG("Invalid argument(s).");
+            return 0;
+        }
     }
     
     uint64_t bpt_len = 0;
     /* try to get a length, optional argument */
-    token = strsep(&local_exp, " ");
-    if (token != NULL)
+    try
     {
-        if (strncmp(token, "0x", 2) == 0)
+        token = tokens.at(2);
+    }
+    catch (const std::out_of_range&)
+    {
+        token = "";
+    }
+
+    if (!token.empty())
+    {
+        if (token.starts_with("0x"))
         {
-            bpt_len = strtoull(token, NULL, 16);
+            bpt_len = strtoull(token.c_str(), NULL, 16);
             DEBUG_MSG("Breakpoint length is 0x%llx.", bpt_len);
         }
         else
         {
-            bpt_len = strtoull(token, NULL, 10);
+            bpt_len = strtoull(token.c_str(), NULL, 10);
             if (errno == EINVAL || errno == ERANGE)
             {
                 ERROR_MSG("Invalid argument(s).");
-                free(local_exp_ptr);
                 return 0;
             }
             DEBUG_MSG("Breakpoint length is 0x%llx.", bpt_len);
         }
     }
     
-    free(local_exp_ptr);
     add_breakpoint(bpt_addr, bpt_len, kPermBreakpoint);
     return 0;
 }
@@ -253,42 +262,35 @@ add_bpt_cmd(const char *exp, uc_engine *uc)
 static int
 del_bpt_cmd(const char *exp, uc_engine *uc)
 {
-    errno = 0;
-    
-    char *token = NULL;
-    uint64_t bpt_addr = 0;
-    uint64_t bpt_nr = 0;
-    
-    char *local_exp = NULL;
-    char *local_exp_ptr = NULL;
-    local_exp_ptr = local_exp = strdup(exp);
-    if (local_exp == NULL)
+    auto tokens = tokenize(exp);
+    _ASSERT(tokens.at(0) == "bpd");
+
+    std::string token;
+    try
     {
-        ERROR_MSG("strdup failed");
-        return 0;
+        token = tokens.at(1);
     }
-    
-    strsep(&local_exp, " ");
-    token = strsep(&local_exp, " ");
-    free(local_exp_ptr);
-    
-    /* we need a target address */
-    if (token == NULL)
+    catch (const std::out_of_range&)
     {
+        /* we need a target address */
         ERROR_MSG("Missing argument(s).");
         return 0;
     }
+
     /* must be in 0x format */
-    if (strncmp(token, "0x", 2) == 0)
+    if (token.starts_with("0x"))
     {
-        bpt_addr = strtoull(token, NULL, 16);
-        del_breakpoint(bpt_addr);
+        auto bpt_addr = strtoull(token.c_str(), nullptr, 16);
+        if (del_breakpoint(bpt_addr) != 0)
+        {
+            ERROR_MSG("Breakpoint not found.");
+        }
         return 0;
     }
-    /* everything else is invalid */
+    /* decimal number implies breakpoint index */
     else
     {
-        bpt_nr = strtoull(token, NULL, 10);
+        auto bpt_nr = std::strtoull(token.c_str(), NULL, 10);
         if (errno == EINVAL || errno == ERANGE)
         {
             ERROR_MSG("Invalid argument(s).");
@@ -300,7 +302,10 @@ del_bpt_cmd(const char *exp, uc_engine *uc)
         {
             if (count == bpt_nr)
             {
-                del_breakpoint(tmp_entry->address);
+                if (del_breakpoint(tmp_entry->address) != 0)
+                {
+                    ERROR_MSG("Breakpoint not found.");
+                }
                 return 0;
             }
             count++;
