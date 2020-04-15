@@ -80,6 +80,8 @@
 #include "unicorn_utils.h"
 #include "mem_utils.h"
 #include "guids.h"
+#include "taint.h"
+#include "mem_taint.h"
 
 extern struct nvram_vars_tailhead g_nvram_vars;
 
@@ -397,6 +399,9 @@ hook_GetVariable(uc_engine *uc, uint64_t address, uint32_t size, void *user_data
             goto out;
         }
 
+        /* taint only the required data size returned to the caller */
+        taint_mem(r_r9, sizeof(DataSize));
+
         /* return value */
         ret = EFI_BUFFER_TOO_SMALL;
         goto out;
@@ -418,6 +423,7 @@ hook_GetVariable(uc_engine *uc, uint64_t address, uint32_t size, void *user_data
         /* We need to set Attributes (ignore for now), DataSize, and Data */
         
         /* write contents into Unicorn memory */
+        content_size = min(content_size, DataSize);
         if (uc_mem_write(uc, Data, var_buf, content_size) != UC_ERR_OK)
         {
             ERROR_MSG("Error writing Data.");
@@ -432,6 +438,11 @@ hook_GetVariable(uc_engine *uc, uint64_t address, uint32_t size, void *user_data
             ret = EFI_UNSUPPORTED;
             goto out;
         }
+
+        /* taint the entire data buffer returned to the caller, plus the size */
+        taint_mem(Data, content_size);
+        taint_mem(r_r9, sizeof(DataSize));
+
         ret = EFI_SUCCESS;
         goto out;
     }
@@ -603,8 +614,8 @@ hook_SetVariable(uc_engine *uc, uint64_t address, uint32_t size, void *user_data
     VERIFY_UC_OPERATION_VOID(err, "Failed to read RCX register");
     /* copy the VariableName from Unicorn memory */
     /* XXX: max 256 wide chars */
-    CHAR16 var_name[256+1] = {0};
-    CHAR16 *var_name_ptr = var_name;
+    wchar_t var_name[256+1] = {0};
+    wchar_t *var_name_ptr = var_name;
     err = uc_mem_read(uc, r_rcx, var_name, sizeof(var_name));
     VERIFY_UC_OPERATION_NORET(err, "Failed to read VariableName")
     uint32_t length = StrLen(var_name_ptr);
@@ -641,6 +652,13 @@ hook_SetVariable(uc_engine *uc, uint64_t address, uint32_t size, void *user_data
     std::vector<std::byte> var_data(r_r9);
     uc_mem_read(uc, r_data, var_data.data(), r_r9);
 
+    if (r_r9 == 0)
+    {
+        /* delete variable */
+        del_nvram_var(var_name);
+        goto out;
+    }
+
     auto new_entry = static_cast<struct nvram_variables*>(my_malloc(sizeof(struct nvram_variables)));
     memcpy(&new_entry->guid, guid, sizeof(EFI_GUID));
     if (length * 2 + 2 <= sizeof(new_entry->name))
@@ -657,6 +675,7 @@ hook_SetVariable(uc_engine *uc, uint64_t address, uint32_t size, void *user_data
     memcpy(new_entry->data, var_data.data(), new_entry->data_size);
     TAILQ_INSERT_TAIL(&g_nvram_vars, new_entry, entries);
 
+out:
     /* return value */
     uint64_t r_rax = EFI_SUCCESS;
     err = uc_reg_write(uc, UC_X86_REG_RAX, &r_rax);

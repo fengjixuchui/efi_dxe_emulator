@@ -84,6 +84,8 @@
 #include "guids.h"
 #include "events.h"
 #include "loader.h"
+#include "taint.h"
+#include "reg_taint.h"
 
 static void hook_RaiseTPL(uc_engine *uc, uint64_t address, uint32_t size, void *user_data);
 static void hook_RestoreTPL(uc_engine *uc, uint64_t address, uint32_t size, void *user_data);
@@ -402,6 +404,28 @@ install_boot_services(uc_engine *uc, uint64_t base_addr, size_t *out_count)
     return 0;
 }
 
+#define HOB_LIST_GUID \
+  { \
+    0x7739f24c, 0x93d7, 0x11d4, {0x9a, 0x3a, 0x0, 0x90, 0x27, 0x3f, 0xc1, 0x4d } \
+  }
+
+EFI_GUID gEfiHobListGuid = HOB_LIST_GUID;
+
+int
+install_configuration_table(uc_engine* uc, uint64_t base_addr, size_t *out_count)
+{
+    /* create the configuration table */
+    EFI_CONFIGURATION_TABLE conf_table[1] = {
+        { gEfiHobListGuid, nullptr },
+    };
+
+    uc_err err = uc_mem_write(uc, base_addr, &conf_table, sizeof(conf_table));
+    VERIFY_UC_OPERATION_RET(err, -1, "Failed to write configuration table");
+    *out_count = _countof(conf_table);
+
+    return 0;
+}
+
 char *
 lookup_boot_services_table(int offset)
 {
@@ -623,6 +647,13 @@ hook_AllocatePool(uc_engine *uc, uint64_t address, uint32_t size, void *user_dat
     uint64_t r_rax = EFI_SUCCESS;
     err = uc_reg_write(uc, UC_X86_REG_RAX, &r_rax);
     VERIFY_UC_OPERATION_VOID(err, "Failed to write RAX return value");
+
+#ifdef _DEBUG
+    if (is_reg_tainted(X86_REG_RDX))
+    {
+        TAINT_MSG("AllocatePool() was called with user-controllable size!");
+    }
+#endif // _DEBUG
 }
 
 /*

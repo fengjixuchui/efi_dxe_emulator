@@ -97,6 +97,7 @@
 #include "guids.h"
 #include "sync.h"
 #include "events.h"
+#include "taint.h"
 
 extern struct bin_images_tailq g_images;
 struct configuration g_config;
@@ -302,6 +303,7 @@ main(int argc, const char * argv[])
     register_global_cmds(uc);
     register_breakpoint_cmds(uc);
     register_nvram_cmds(uc);
+    register_sync_cmds(uc);
     
     /* allocate the different memory areas for executables, stack, heap, efi services, etc */
     if (allocate_emulation_mem(uc) != 0)
@@ -401,7 +403,14 @@ main(int argc, const char * argv[])
         ERROR_MSG("Failed to add invalid instruction hook.");
         return EXIT_FAILURE;
     }
-    
+
+    /* add a hook to trap valid memory accesses */
+    if (add_unicorn_hook(uc, UC_HOOK_MEM_VALID, hook_valid_mem, 1, 0) != 0)
+    {
+        ERROR_MSG("Failed to add valid memory access hook.");
+        return EXIT_FAILURE;
+    }
+
     uint64_t total_images = 0;
     struct bin_image *tmp_image = NULL;
     TAILQ_FOREACH(tmp_image, &g_images, entries)
@@ -462,7 +471,7 @@ main(int argc, const char * argv[])
     }
     
     /* add breakpoint on entrypoint - we always start the emulator stopped on entrypoint */
-    if (add_breakpoint(main_image->base_addr + main_image->entrypoint, 0, kPermBreakpoint, "Entrypoint") != 0)
+    if (add_breakpoint(main_image->base_addr + main_image->entrypoint, 0, kTempBreakpoint, "Entrypoint") != 0)
     {
         ERROR_MSG("Failed to add entrypoint breakpoint.");
         return EXIT_FAILURE;
